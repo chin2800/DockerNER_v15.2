@@ -16,8 +16,9 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements and install dependencies
 COPY requirements.txt .
 
-# Upgrade pip, setuptools, wheel so pkg_resources is available
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+# Install compatible versions of pip, setuptools, wheel with pkg_resources
+RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --no-cache-dir "setuptools<66" wheel
 
 # Then install the rest of the requirements
 RUN pip install --no-cache-dir -r requirements.txt

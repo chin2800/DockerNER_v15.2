@@ -2,35 +2,11 @@ import os
 import shutil
 import logging
 from typing import Dict, List, Optional
-from huggingface_hub import snapshot_download
 from pathlib import Path
 import spacy
 import json
 import numpy as np
 import re
-
-# Load configuration from config.json
-with open('config.json', 'r') as config_file:
-    config = json.load(config_file)
-
-# Define a cached directory for the model
-def get_cached_model_path(repo_id, token=None):
-    cache_dir = "cached_model"
-    os.makedirs(cache_dir, exist_ok=True)
-    local_model_path = os.path.join(cache_dir, repo_id.replace('/', '_'))
-
-    if not os.path.exists(local_model_path):
-        logging.info(f"Downloading model to {local_model_path}...")
-        # Download with token if available, otherwise without
-        if token:
-            snapshot_download(repo_id=repo_id, local_dir=local_model_path, token=token)
-        else:
-            logging.warning("No Hugging Face token provided. Download may fail if repo is private.")
-            snapshot_download(repo_id=repo_id, local_dir=local_model_path)
-    else:
-        logging.info(f"Using cached model from {local_model_path}")
-
-    return local_model_path
 
 # --- SKU + NER logic ---
 sku_pattern = re.compile(r'''
@@ -104,24 +80,8 @@ class TextNERModel:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         self.logger = logging.getLogger(__name__)
 
-        # Token is optional: first from parameter, then environment variable
-        token = token or os.getenv("HF_TOKEN")
-        if not token:
-            self.logger.warning(
-                "No Hugging Face token provided. Model download may fail if repo is private."
-            )
-
-        # Repo ID from config
-        repo_id = repo_id or config.get('HUGGINGFACE_REPO_ID')
-        if not repo_id:
-            self.logger.error("Repository ID is not provided in config.json")
-            raise ValueError("Repository ID is required. Please add 'HUGGINGFACE_REPO_ID' to config.json.")
-
-        # Download model
-        local_model_path = get_cached_model_path(repo_id, token)
-        self._check_model_structure(local_model_path)
-
-        model_path = Path(local_model_path)
+        # ✅ Load model locally from Docker image
+        model_path = Path("/app/NER_v16")
         config_path = model_path / "config.cfg"
 
         if not config_path.exists():

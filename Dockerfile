@@ -14,13 +14,10 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-<<<<<<< HEAD
 # Copy requirements and install dependencies
 COPY requirements.txt .
-=======
 # Upgrade pip and tools
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel pkg_resources
->>>>>>> d96888c (Removing HuggingFace)
 
 # Install compatible versions of pip, setuptools, wheel with pkg_resources
 RUN pip install --no-cache-dir --upgrade pip

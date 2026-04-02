@@ -1,5 +1,6 @@
 FROM python:3.10-slim
 
+# Use a shorter working directory to avoid path length issues
 WORKDIR /app
 
 # Make sure basic OS packages are available
@@ -34,6 +35,11 @@ EXPOSE 9000
 ENV MODEL_NAME=TextNERModel
 ENV SERVICE_TYPE=MODEL
 ENV PERSISTENCE=0
+
+# Set shorter temp directory path to avoid Unix socket path length issues
+ENV TMPDIR=/tmp
+ENV TEMP=/tmp
+ENV TMP=/tmp
 
 # Fix permissions
 RUN chown -R 8888 /app

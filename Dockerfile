@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# Use a shorter working directory to avoid path length issues
+# Use a shorter working directory
 WORKDIR /app
 
 # Make sure basic OS packages are available
@@ -36,7 +36,13 @@ ENV MODEL_NAME=TextNERModel
 ENV SERVICE_TYPE=MODEL
 ENV PERSISTENCE=0
 
-# Set shorter temp directory path to avoid Unix socket path length issues
+# Fix Unix socket path length issue by disabling metrics
+ENV SELDON_DISABLE_METRICS=true
+
+# Alternative: Set multiprocessing start method
+ENV MULTIPROCESSING_START_METHOD=spawn
+
+# Set shorter temp paths
 ENV TMPDIR=/tmp
 ENV TEMP=/tmp
 ENV TMP=/tmp
@@ -44,5 +50,5 @@ ENV TMP=/tmp
 # Fix permissions
 RUN chown -R 8888 /app
 
-# Start service
-CMD ["python", "-m", "seldon_core.microservice", "TextNERModel", "--service-type", "MODEL", "--persistence", "0"]
+# Use single worker to avoid multiprocessing issues
+CMD ["python", "-m", "seldon_core.microservice", "TextNERModel", "--service-type", "MODEL", "--persistence", "0", "--workers", "1"]

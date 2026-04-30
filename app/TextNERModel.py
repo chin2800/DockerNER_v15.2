@@ -4,88 +4,94 @@ import logging
 from typing import Dict, List, Optional
 from pathlib import Path
 import spacy
-import json
 import numpy as np
 import re
 
-# --- SKU + NER logic ---
+
+def normalize_sku_spacing(text):
+    return re.sub(r'(?<=\w)\s*-\s*(?=\w)', '-', text)
+
+
 sku_pattern = re.compile(r'''
     \b
-    (?=[A-Za-z0-9\-]*\d)          # at least one digit
-    [A-Za-z0-9]{2,}               # first chunk
-    (?:-[A-Za-z0-9]{1,}){0,3}     # up to 3 hyphen-separated chunks
+    (?:K[\s\-]?)?
+    [A-Z0-9]{2,6}
+    (?:[\s\-]?[A-Z0-9]{1,6}){0,4}
     \b
-''', re.VERBOSE | re.IGNORECASE)
+''', re.VERBOSE)
 
-STOPWORDS = {"GPM", "LPM", "MM", "CM", "IN", "FT", "ADA"}
+STOPWORDS = {"GPM", "LPM", "MM", "CM", "IN", "FT", "150th"}
 
-def is_valid_sku(text):
-    return (
-        text.upper() not in STOPWORDS and
-        len(text) <= 25 and
-        len(text.split()) == 1
-    )
 
 def extract_skus(text):
-    results = []
-    for m in sku_pattern.finditer(text):
-        val = m.group().strip()
-        if is_valid_sku(val):
-            results.append({
-                "start": m.start(),
-                "end": m.end(),
-                "text": val
-            })
-    return results
+    return [
+        {'start': m.start(), 'end': m.end(), 'text': m.group().strip()}
+        for m in sku_pattern.finditer(text)
+        if (
+            re.search(r'[A-Z0-9]', m.group()) and
+            m.group().strip().upper() not in STOPWORDS
+        )
+    ]
 
-def dedupe_entities(entities):
+
+def dedupe_by_text(entities):
     seen = {}
     for ent in entities:
-        key = (ent.start_char, ent.end_char, ent.label_)
-        if key not in seen:
+        key = ent.text.strip().lower()
+        if key not in seen or (
+            (ent.end_char - ent.start_char) >
+            (seen[key].end_char - seen[key].start_char)
+        ):
             seen[key] = ent
     return list(seen.values())
 
-def spans_overlap(a, b):
-    return a.start_char < b.end_char and b.start_char < a.end_char
 
 def merge_skus_with_ner(text, nlp):
-    ner_doc = nlp(text)
-    base_doc = nlp.make_doc(text)
+    clean_text = normalize_sku_spacing(text)
 
-    # Extract SKU spans
-    raw_skus = extract_skus(text)
-    sku_spans = []
-    for m in raw_skus:
-        span = base_doc.char_span(m["start"], m["end"], label="SKU")
+    sku_spans = extract_skus(clean_text)
+
+    doc = nlp.make_doc(clean_text)
+    sku_ents = []
+
+    for match in sku_spans:
+        span = doc.char_span(match['start'], match['end'], label="SKU")
         if span:
-            sku_spans.append(span)
+            sku_ents.append(span)
 
-    # Remove NER entities that overlap with SKUs
-    filtered_ents = []
+    ner_doc = nlp(clean_text)
+
+    final_ents = []
     for ent in ner_doc.ents:
-        if any(spans_overlap(ent, sku) for sku in sku_spans):
-            continue
-        filtered_ents.append(ent)
+        if all(
+            not (ent.start_char < sku.end_char and sku.start_char < ent.end_char)
+            for sku in sku_ents
+        ):
+            final_ents.append(ent)
 
-    # Combine and dedupe
-    final_ents = filtered_ents + sku_spans
-    ner_doc.ents = dedupe_entities(final_ents)
+    all_ents = final_ents + sku_ents
+    deduped_ents = dedupe_by_text(all_ents)
 
+    ner_doc.ents = deduped_ents
     return ner_doc
+
 
 # --- Model class ---
 class TextNERModel:
     def __init__(self, repo_id: str = None, token: str = None):
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
         self.logger = logging.getLogger(__name__)
 
-        # ✅ Load model locally from Docker image
-        model_path = Path("/app/NER_v16")
+        model_path = Path("/app/NER_v19")
         config_path = model_path / "config.cfg"
 
         if not config_path.exists():
-            self.logger.error(f"config.cfg not found in the model directory: {model_path}")
+            self.logger.error(
+                f"config.cfg not found in the model directory: {model_path}"
+            )
             self.nlp = None
             return
 
@@ -98,8 +104,11 @@ class TextNERModel:
 
     def _check_model_structure(self, model_path):
         moves_file_path = os.path.join(model_path, "model", "moves")
+
         if not os.path.exists(moves_file_path):
-            self.logger.warning("The 'moves' file is missing from the model directory.")
+            self.logger.warning(
+                "The 'moves' file is missing from the model directory."
+            )
 
         self._move_file(model_path, "model", "ner", "moves")
         self._move_file(model_path, "model", "ner", "cfg")
@@ -114,15 +123,26 @@ class TextNERModel:
             shutil.move(source, target)
             self.logger.info(f"Moved '{file_name}' to '{target_dir}'")
         elif not os.path.exists(source):
-            self.logger.warning(f"File '{file_name}' does not exist in the model directory.")
+            self.logger.warning(
+                f"File '{file_name}' does not exist in the model directory."
+            )
 
-    def predict(self, X: Optional[np.ndarray] = None, names: Optional[List[str]] = None, meta: Optional[Dict] = None):
+    def predict(
+        self,
+        X: Optional[np.ndarray] = None,
+        names: Optional[List[str]] = None,
+        meta: Optional[Dict] = None
+    ):
         if X is None or len(X) == 0:
-            self.logger.info("Received empty or None input. Returning empty list.")
+            self.logger.info(
+                "Received empty or None input. Returning empty list."
+            )
             return []
 
         if self.nlp is None:
-            self.logger.error("spaCy model not loaded. Returning empty list.")
+            self.logger.error(
+                "spaCy model not loaded. Returning empty list."
+            )
             return []
 
         if isinstance(X, str):
@@ -134,12 +154,14 @@ class TextNERModel:
             text = str(model_input.get("text", ""))
 
         if not text:
-            self.logger.error("No text provided for processing. Returning empty list.")
+            self.logger.error(
+                "No text provided for processing. Returning empty list."
+            )
             return []
 
         self.logger.info(f"Received input for NER: {text}")
 
-        # Use merged SKU + NER logic
+        # Corrected call
         doc = merge_skus_with_ner(text, self.nlp)
 
         self.logger.info(f"Number of entities found: {len(doc.ents)}")

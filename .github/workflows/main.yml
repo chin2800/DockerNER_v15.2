@@ -2,33 +2,56 @@ name: Test Docker Image
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main" ]
+    inputs:
+      image_name:
+        description: "Docker image name"
+        required: true
+        type: string
+        default: "ko178b4/ner29_v2"
+
+      image_tag:
+        description: "Docker image tag"
+        required: true
+        type: string
+        default: "latest"
 
 jobs:
   test-image:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Pull Docker image
-      run: docker pull ko178b4/ner29_v2:latest
+      - name: Set image full name
+        run: |
+          echo "IMAGE=${{ inputs.image_name }}:${{ inputs.image_tag }}" >> $GITHUB_ENV
 
-    - name: Run container
-      run: |
-        docker run -d -p 5000:5000 --name test-container ko178b4/ner29_v2:latest
+      - name: Pull Docker image
+        run: docker pull $IMAGE
 
-    - name: Wait for startup
-      run: sleep 15
+      - name: Inspect image
+        run: docker inspect $IMAGE
 
-    - name: Show logs (IMPORTANT)
-      run: docker logs test-container
+      - name: Run container
+        run: |
+          docker run -d \
+            --name test-container \
+            -p 5000:5000 \
+            $IMAGE
 
-    - name: Check if container is running
-      run: docker ps -a
+      - name: Wait for startup
+        run: sleep 20
 
-    - name: Test endpoint (optional)
-      run: |
-        curl http://localhost:5000 || echo "Service not responding"
+      - name: Show logs
+        if: always()
+        run: docker logs test-container || true
 
-    - name: Stop container
-      run: docker stop test-container || true
+      - name: Check status
+        if: always()
+        run: docker ps -a
+
+      - name: Test endpoint
+        run: |
+          curl -v http://localhost:5000 || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f test-container || true

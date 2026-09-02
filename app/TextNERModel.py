@@ -85,7 +85,7 @@ class TextNERModel:
         )
         self.logger = logging.getLogger(__name__)
 
-        model_path = Path("/app/NER_v19")
+        model_path = Path("/app/NER_v36")
         config_path = model_path / "config.cfg"
 
         if not config_path.exists():

@@ -4,70 +4,120 @@ import logging
 from typing import Dict, List, Optional
 from pathlib import Path
 import spacy
-import json
 import numpy as np
 import re
+from spacy.util import filter_spans
+
 
 # --- SKU + NER logic ---
+
 sku_pattern = re.compile(r'''
-    (?i)
-    \b
-    K[\s\-]*
-    [A-Z]{1,3}
+    (?<![A-Z0-9])
+    K
+    (?:[\s\-]*[A-Z]{1,3})?
     [\s\-]*
-    \d{2,6}
-    \b
-''', re.VERBOSE)
+    \d{2,7}
+    (?:[\s\-]*[A-Z0-9]{1,4})*
+    (?![A-Z0-9])
+''', re.VERBOSE | re.IGNORECASE)
+
 
 STOPWORDS = {"GPM", "LPM", "MM", "CM", "IN", "FT", "150TH", "GPF", "WITH", "FROM"}
 
+
+def normalize_sku(text):
+    return re.sub(r'[\s\-]+', '', text).upper()
+
+
 def extract_skus(text):
     skus = []
+
+    if not isinstance(text, str) or not text.strip():
+        return skus
+
     for m in sku_pattern.finditer(text):
         cleaned_text = m.group().strip()
-        upper_text = cleaned_text.upper()
+        normalized_text = normalize_sku(cleaned_text)
 
-        if upper_text in STOPWORDS:
+        if not normalized_text:
             continue
 
-        skus.append({'start': m.start(), 'end': m.end(), 'text': cleaned_text})
+        if normalized_text in STOPWORDS:
+            continue
+
+        skus.append({
+            'start': m.start(),
+            'end': m.end(),
+            'text': cleaned_text,
+            'normalized': normalized_text
+        })
 
     return skus
 
-def dedupe_by_text(entities):
-    seen = {}
-    for ent in entities:
-        key = ent.text.strip().lower()
-        if key not in seen or (ent.end_char - ent.start_char) > (seen[key].end_char - seen[key].start_char):
-            seen[key] = ent
-    return list(seen.values())
 
-def merge_skus_with_ner(text):
-    sku_spans = extract_skus(text)
+def spans_overlap(first_span, second_span):
+    return first_span.start_char < second_span.end_char and second_span.start_char < first_span.end_char
 
-    doc = nlp.make_doc(text)
+
+def dedupe_entities(entities):
+    seen = set()
+    deduped = []
+
+    for ent in sorted(entities, key=lambda e: (e.start_char, -(e.end_char - e.start_char))):
+        key = (ent.start_char, ent.end_char, ent.label_)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        deduped.append(ent)
+
+    return deduped
+
+
+def merge_skus_with_ner(text, nlp):
+    sku_matches = extract_skus(text)
+    ner_doc = nlp(text)
     sku_ents = []
 
-    for match in sku_spans:
-        span = doc.char_span(match['start'], match['end'], label="SKU")
+    for match in sku_matches:
+        span = ner_doc.char_span(
+            match['start'],
+            match['end'],
+            label="SKU",
+            alignment_mode="contract"
+        )
+
+        if span is None:
+            span = ner_doc.char_span(
+                match['start'],
+                match['end'],
+                label="SKU",
+                alignment_mode="expand"
+            )
+
         if span:
             sku_ents.append(span)
 
-    ner_doc = nlp(text)
-
+    sku_ents = filter_spans(sku_ents)
     final_ents = []
+
     for ent in ner_doc.ents:
-        if all(not (ent.start_char < sku.end_char and sku.start_char < ent.end_char) for sku in sku_ents):
+        if all(not spans_overlap(ent, sku) for sku in sku_ents):
             final_ents.append(ent)
 
     all_ents = final_ents + sku_ents
-    deduped_ents = dedupe_by_text(all_ents)
+    deduped_ents = dedupe_entities(all_ents)
 
-    ner_doc.ents = sorted(deduped_ents, key=lambda e: e.start_char)
+    ner_doc.ents = filter_spans(deduped_ents)
+
     return ner_doc
 
+
 # --- Model class ---
+
 class TextNERModel:
+
     def __init__(self, repo_id: str = None, token: str = None):
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         self.logger = logging.getLogger(__name__)
@@ -90,6 +140,7 @@ class TextNERModel:
 
     def _check_model_structure(self, model_path):
         moves_file_path = os.path.join(model_path, "model", "moves")
+
         if not os.path.exists(moves_file_path):
             self.logger.warning("The 'moves' file is missing from the model directory.")
 
@@ -105,12 +156,18 @@ class TextNERModel:
             os.makedirs(os.path.join(model_path, target_dir), exist_ok=True)
             shutil.move(source, target)
             self.logger.info(f"Moved '{file_name}' to '{target_dir}'")
+
         elif not os.path.exists(source):
             self.logger.warning(f"File '{file_name}' does not exist in the model directory.")
 
     def predict(self, X: Optional[np.ndarray] = None, names: Optional[List[str]] = None, meta: Optional[Dict] = None):
-        if X is None or len(X) == 0:
-            self.logger.info("Received empty or None input. Returning empty list.")
+
+        if X is None:
+            self.logger.info("Received None input. Returning empty list.")
+            return []
+
+        if not isinstance(X, str) and len(X) == 0:
+            self.logger.info("Received empty input. Returning empty list.")
             return []
 
         if self.nlp is None:
@@ -122,18 +179,19 @@ class TextNERModel:
         else:
             if names is None:
                 names = ["text"]
+
             model_input = dict(zip(names, X))
             text = str(model_input.get("text", ""))
 
-        if not text:
+        if not text or not text.strip():
             self.logger.error("No text provided for processing. Returning empty list.")
             return []
 
+        text = text.strip()
+
         self.logger.info(f"Received input for NER: {text}")
 
-        global nlp
-        nlp = self.nlp
-        doc = merge_skus_with_ner(text)
+        doc = merge_skus_with_ner(text, self.nlp)
 
         self.logger.info(f"Number of entities found: {len(doc.ents)}")
 
